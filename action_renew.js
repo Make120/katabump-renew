@@ -6,6 +6,16 @@ const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
 
+// --- 退出码（供外层 proxy_runner.js 使用） ---
+const EXIT_CODE = {
+    SUCCESS: 0,
+    FATAL_ERROR: 1,
+    PROXY_RETRY: 2,       // Turnstile 3次尝试仍失败，应换代理重试
+    NOT_READY: 3,         // 还没到续期窗口
+    ALREADY_RENEWED: 4,   // Expiry 未变化，本轮已是最新
+    LOGIN_FAILED: 5       // 账号或密码错误
+};
+
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
@@ -1880,5 +1890,13 @@ async function ensureScreenshotsDir() {
 
     console.log('\n全部账号处理完成。');
     await browser.close();
-    process.exit(0);
+
+    // 映射 runStatus → 退出码（供外层 proxy_runner.js 判断）
+    if (runStatus === 'success') process.exit(EXIT_CODE.SUCCESS);
+    if (runStatus === 'not_ready') process.exit(EXIT_CODE.NOT_READY);
+    if (runStatus === 'already_renewed') process.exit(EXIT_CODE.ALREADY_RENEWED);
+    if (runStatus === 'login_failed') process.exit(EXIT_CODE.LOGIN_FAILED);
+    if (runStatus === 'captcha_required') process.exit(EXIT_CODE.PROXY_RETRY);
+    // 未知状态也按 PROXY_RETRY 处理（外层可能试另一个代理）
+    process.exit(EXIT_CODE.PROXY_RETRY);
 })();
