@@ -1919,7 +1919,7 @@ async function ensureScreenshotsDir() {
         // 仅登录阶段 captcha_required 才触发代理轮换
         if (runStatus === 'captcha_required') {
             if (blockMessage && blockMessage.startsWith('Login')) {
-                anyUserRetriedProxy = true;
+                loginCaptchaFailed = true;
             } else {
                 // Renew ALTCHA 失败 → 不换代理，但也不能返回 SUCCESS
                 if (overallExitCode === EXIT_CODE.SUCCESS) {
@@ -1964,8 +1964,9 @@ async function ensureScreenshotsDir() {
     if (loginCaptchaFailed)
         process.exit(EXIT_CODE.PROXY_RETRY);
     // RENEW_CAPTCHA_FAILED 是正常业务，归一为 0 避免 GHA 显示失败
+    // RENEW_CAPTCHA_FAILED 是业务异常，保持 43 退出，GHA 显示失败是正常的
     if (overallExitCode === EXIT_CODE.RENEW_CAPTCHA_FAILED)
-        process.exit(EXIT_CODE.SUCCESS);
+        process.exit(EXIT_CODE.RENEW_CAPTCHA_FAILED);
     // 其余情况
     process.exit(overallExitCode);
 })();

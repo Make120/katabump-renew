@@ -181,7 +181,11 @@ function cleanChromeData() {
 
 function ensureChromeKilled() {
     killChromeProcesses();
-    waitForPortClosed(CHROME_PORT, 10000);
+    const closed = waitForPortClosed(CHROME_PORT, 10000);
+    if (!closed) {
+        console.error(`[proxy-runner] ${CHROME_PORT} 端口未能关闭，不继续启动新 Chrome`);
+        process.exit(EXIT_CODE.FATAL);
+    }
     cleanChromeData();
 }
 
@@ -268,6 +272,9 @@ function runActionRenew(proxyLine) {
             selection = selectRandomProxy(proxies, cooldowns);
             if (selection) {
                 proxyLine = selection.line;
+            } else {
+                console.log('[proxy-runner] 无可选代理（全部冷却中），停止本轮');
+                process.exit(EXIT_CODE.FATAL);
             }
         } else {
             console.log('[proxy-runner] 无代理列表，直接运行');
