@@ -308,7 +308,15 @@ async function attemptTurnstileIframeClick(page) {
 
 // --- 读取 token / widget 状态（严格健康判断 + 诊断） ---
 async function getTurnstileTokenInfo(page) {
-    return await page.evaluate(() => {
+    // Playwright 侧：所有 frame URL（比 DOM iframe.src 更可靠）
+    let challengeFrameUrls = [];
+    try {
+        challengeFrameUrls = page.frames()
+            .map((f) => f.url())
+            .filter((u) => u && u !== 'about:blank' && /challenges\.cloudflare|turnstile|cloudflare\.com\/cdn-cgi/i.test(u));
+    } catch (e) { }
+
+    const domInfo = await page.evaluate(() => {
         const selectors = [
             'input[name="cf-turnstile-response"]',
             'textarea[name="cf-turnstile-response"]',
@@ -332,6 +340,27 @@ async function getTurnstileTokenInfo(page) {
             });
         }
 
+        // 递归收集 iframe（含 shadowRoot）
+        const iframes = [];
+        const walk = (root) => {
+            if (!root) return;
+            try {
+                root.querySelectorAll('iframe').forEach((el) => {
+                    const rect = el.getBoundingClientRect();
+                    iframes.push({
+                        src: (el.src || el.getAttribute('src') || '').substring(0, 160),
+                        title: el.title || '',
+                        w: Math.round(rect.width || el.offsetWidth || 0),
+                        h: Math.round(rect.height || el.offsetHeight || 0)
+                    });
+                });
+                root.querySelectorAll('*').forEach((el) => {
+                    if (el.shadowRoot) walk(el.shadowRoot);
+                });
+            } catch (e) { }
+        };
+        walk(document);
+
         const widgets = Array.from(document.querySelectorAll('[data-sitekey], .cf-turnstile, #cf-turnstile, [class*="turnstile"]'));
         const widgetInfo = widgets.map((el) => {
             const rect = el.getBoundingClientRect();
@@ -342,17 +371,8 @@ async function getTurnstileTokenInfo(page) {
                 hasShadow: !!el.shadowRoot,
                 visible: !!(rect.width > 0 && rect.height > 0),
                 w: Math.round(rect.width),
-                h: Math.round(rect.height)
-            };
-        });
-
-        const iframes = Array.from(document.querySelectorAll('iframe')).map((el) => {
-            const rect = el.getBoundingClientRect();
-            return {
-                src: (el.src || '').substring(0, 160),
-                title: el.title || '',
-                w: Math.round(rect.width || el.offsetWidth || 0),
-                h: Math.round(rect.height || el.offsetHeight || 0)
+                h: Math.round(rect.height),
+                childIframes: el.querySelectorAll('iframe').length
             };
         });
 
@@ -360,24 +380,31 @@ async function getTurnstileTokenInfo(page) {
         const verificationFailed = /Verification failed/i.test(bodyText)
             || (/Troubleshoot/i.test(bodyText) && /CLOUDFLARE|cloudflare/i.test(bodyText));
 
+        // Turnstile 脚本是否已加载
+        const scripts = Array.from(document.querySelectorAll('script[src]')).map((s) => s.src);
+        const turnstileScriptLoaded = scripts.some((s) => /challenges\.cloudflare\.com|turnstile/i.test(s));
+        const turnstileApi = typeof window.turnstile !== 'undefined';
+
         const hasResponseField = found.length > 0;
         const cfWidgetVisible = widgetInfo.some((w) =>
             w.visible && (/cf-turnstile/i.test(w.className) || w.sitekey)
         );
 
-        // 健康 iframe：真实尺寸 + 有效 src（challenges.cloudflare / turnstile）
+        // 健康 iframe：真实尺寸 + 有效 src
         const healthyIframe = iframes.find((f) =>
             f.w >= 50 && f.h >= 20
             && f.src
             && /challenges\.cloudflare|turnstile|cloudflare/i.test(f.src + ' ' + f.title)
         );
 
-        // 死 iframe：1x1 / 空 src 小框，且没有健康 iframe
+        // 死 iframe：1x1 / 空 src 小框
         const deadIframe = !healthyIframe && iframes.some((f) =>
             (f.w <= 5 && f.h <= 5) || (!f.src && f.w <= 30 && f.h <= 30)
         );
 
-        // 严格健康：无 Verification failed + 可见 .cf-turnstile + response 字段存在 + 非 1x1 + 有效 src 或可交互尺寸
+        // challenge 未 hydrate：容器在、字段在，但没有健康 iframe
+        const challengeNotHydrated = cfWidgetVisible && hasResponseField && !healthyIframe && !verificationFailed;
+
         const strictlyHealthy = !verificationFailed
             && cfWidgetVisible
             && hasResponseField
@@ -396,13 +423,34 @@ async function getTurnstileTokenInfo(page) {
             cfWidgetVisible,
             healthyIframe: !!healthyIframe,
             deadIframe,
-            strictlyHealthy
+            strictlyHealthy,
+            challengeNotHydrated,
+            turnstileScriptLoaded,
+            turnstileApi,
+            scriptCount: scripts.filter((s) => /cloudflare|turnstile/i.test(s)).length
         };
     }).catch(() => ({
         found: false, selector: null, length: 0, fields: [], widgets: [], iframes: [],
         verificationFailed: false, hasResponseField: false, cfWidgetVisible: false,
-        healthyIframe: false, deadIframe: false, strictlyHealthy: false
+        healthyIframe: false, deadIframe: false, strictlyHealthy: false,
+        challengeNotHydrated: false, turnstileScriptLoaded: false, turnstileApi: false, scriptCount: 0
     }));
+
+    // 若 Playwright 看到真实 challenge frame，也算健康（即使 DOM src 为空）
+    if (challengeFrameUrls.length > 0 && !domInfo.healthyIframe) {
+        domInfo.healthyIframe = true;
+        domInfo.challengeFrameUrls = challengeFrameUrls.map((u) => u.substring(0, 120));
+        // 有真实 challenge frame + 可见 widget + 字段 → 可点击
+        if (!domInfo.verificationFailed && domInfo.cfWidgetVisible && domInfo.hasResponseField) {
+            domInfo.strictlyHealthy = true;
+            domInfo.challengeNotHydrated = false;
+            domInfo.deadIframe = false;
+        }
+    } else {
+        domInfo.challengeFrameUrls = challengeFrameUrls.map((u) => u.substring(0, 120));
+    }
+
+    return domInfo;
 }
 
 // --- 清除旧 challenge 点击数据（刷新后必须调用） ---
@@ -482,6 +530,7 @@ async function reloadLoginChallenge(page, reason = 'refresh') {
 async function waitForHealthyTurnstile(page, timeoutMs = 20000) {
     const startedAt = Date.now();
     console.log(`[登录阶段] 等待 Turnstile widget 就绪 (最长 ${timeoutMs}ms)...`);
+    let lastLogAt = 0;
 
     while (Date.now() - startedAt < timeoutMs) {
         const info = await getTurnstileTokenInfo(page);
@@ -496,20 +545,40 @@ async function waitForHealthyTurnstile(page, timeoutMs = 20000) {
             return { state, ready: false, autoSolved: false, failed: true, info };
         }
         if (info.strictlyHealthy) {
-            console.log('[登录阶段] state=turnstile_widget_ready（严格健康：可见 widget + response 字段 + 有效 iframe）。');
+            console.log(`[登录阶段] state=turnstile_widget_ready（严格健康）。challengeFrames=${JSON.stringify(info.challengeFrameUrls || [])}`);
             return { state: 'turnstile_widget_ready', ready: true, autoSolved: false, failed: false, info };
         }
 
-        // 诊断心跳（每轮一次简短日志）
-        if ((Date.now() - startedAt) % 5000 < 1100) {
-            console.log(`[登录阶段] 等待中 state=${state} cfVisible=${info.cfWidgetVisible} field=${info.hasResponseField} healthyIframe=${info.healthyIframe} dead=${info.deadIframe}`);
+        // 诊断心跳
+        if (Date.now() - lastLogAt >= 4000) {
+            lastLogAt = Date.now();
+            console.log(
+                `[登录阶段] 等待中 state=${state}` +
+                ` cfVisible=${info.cfWidgetVisible}` +
+                ` field=${info.hasResponseField}` +
+                ` healthyIframe=${info.healthyIframe}` +
+                ` dead=${info.deadIframe}` +
+                ` notHydrated=${!!info.challengeNotHydrated}` +
+                ` script=${!!info.turnstileScriptLoaded}` +
+                ` api=${!!info.turnstileApi}` +
+                ` frames=${JSON.stringify(info.challengeFrameUrls || [])}` +
+                ` iframes=${JSON.stringify(info.iframes)}`
+            );
         }
         await page.waitForTimeout(1000);
     }
 
     const finalInfo = await getTurnstileTokenInfo(page);
     const state = classifyTurnstileState(finalInfo);
-    console.log(`[登录阶段] widget 等待超时。state=${state} healthy=${finalInfo.healthyIframe} dead=${finalInfo.deadIframe} failed=${finalInfo.verificationFailed} iframes=${JSON.stringify(finalInfo.iframes)}`);
+    console.log(
+        `[登录阶段] widget 等待超时。state=${state}` +
+        ` healthy=${finalInfo.healthyIframe} dead=${finalInfo.deadIframe}` +
+        ` notHydrated=${!!finalInfo.challengeNotHydrated}` +
+        ` script=${!!finalInfo.turnstileScriptLoaded} api=${!!finalInfo.turnstileApi}` +
+        ` challengeFrames=${JSON.stringify(finalInfo.challengeFrameUrls || [])}` +
+        ` iframes=${JSON.stringify(finalInfo.iframes)}` +
+        ` widgets=${JSON.stringify(finalInfo.widgets)}`
+    );
     return {
         state,
         ready: false,
@@ -547,6 +616,7 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
     const maxReloads = 3;
     let reloads = 0;
     let lastState = 'turnstile_widget_not_ready';
+    let consecutiveNotHydrated = 0;
     console.log(`[登录阶段] 开始解决 Turnstile（失败识别 + 新 challenge 重载 + token 验证，最长 ${totalTimeoutMs}ms，最多刷新 ${maxReloads} 次）...`);
 
     const strategies = [
@@ -557,8 +627,9 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
 
     while (Date.now() - startedAt < totalTimeoutMs) {
         // 1) 完整等待：DOM 已加载后 → 等初始化 → 健康检查
-        const health = await waitForHealthyTurnstile(page, 20000);
+        const health = await waitForHealthyTurnstile(page, 15000);
         lastState = health.state || lastState;
+        const info = health.info || {};
 
         if (health.autoSolved || health.state === 'turnstile_token_ready') {
             console.log('[登录阶段] state=turnstile_token_ready');
@@ -567,6 +638,7 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
 
         // 2) Verification failed → 不再点击，刷新新 challenge
         if (health.failed || health.state === 'turnstile_verification_failed') {
+            consecutiveNotHydrated = 0;
             reloads++;
             if (reloads > maxReloads) {
                 console.log(`[登录阶段] state=turnstile_verification_failed，已刷新 ${maxReloads} 次仍失败。结束本轮，不再重试。`);
@@ -582,11 +654,42 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
             } catch (e) {
                 console.log(`[登录阶段] 刷新失败: ${e.message}`);
             }
-            continue; // 必须重新走完整等待，不立即点击
+            continue;
         }
 
-        // 3) widget 未就绪 → 刷新，不点
+        // 3) challenge 未 hydrate：容器在、字段在，但 iframe 始终 1x1/空/无
+        //    这不是“点偏”，是 challenge 没加载。刷新几次后尽早结束。
+        if (info.challengeNotHydrated || (info.cfWidgetVisible && info.hasResponseField && !info.healthyIframe && !info.verificationFailed)) {
+            consecutiveNotHydrated++;
+            reloads++;
+            console.log(
+                `[登录阶段] state=turnstile_widget_not_ready (challenge_not_hydrated)` +
+                ` consecutive=${consecutiveNotHydrated}` +
+                ` script=${!!info.turnstileScriptLoaded} api=${!!info.turnstileApi}` +
+                ` iframes=${JSON.stringify(info.iframes)}` +
+                ` challengeFrames=${JSON.stringify(info.challengeFrameUrls || [])}`
+            );
+
+            if (reloads > maxReloads || consecutiveNotHydrated >= 2) {
+                // 连续 2 次或超过 maxReloads：环境无法加载 challenge
+                console.log('[登录阶段] challenge iframe 始终未 hydrate。结束本轮，不再空等。');
+                return {
+                    ok: false,
+                    state: 'turnstile_widget_not_ready',
+                    message: 'Turnstile challenge iframe never hydrated (1x1/empty src). Environment likely blocked by Cloudflare.'
+                };
+            }
+
+            console.log(`[登录阶段] challenge 未 hydrate → 刷新 (${reloads}/${maxReloads})`);
+            try {
+                await reloadLoginChallenge(page, 'challenge_not_hydrated');
+            } catch (e) { }
+            continue;
+        }
+
+        // 4) 其他 widget 未就绪
         if (!health.ready || health.state === 'turnstile_widget_not_ready') {
+            consecutiveNotHydrated = 0;
             reloads++;
             if (reloads > maxReloads) {
                 console.log(`[登录阶段] state=turnstile_widget_not_ready，已刷新 ${maxReloads} 次仍未就绪。结束本轮。`);
@@ -603,13 +706,13 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
             continue;
         }
 
-        // 4) widget 健康 → 才允许点击
+        // 5) widget 健康 → 才允许点击
+        consecutiveNotHydrated = 0;
         console.log('[登录阶段] state=turnstile_widget_ready，开始点击策略。');
         let gotToken = false;
         for (const strategy of strategies) {
             if (Date.now() - startedAt >= totalTimeoutMs) break;
 
-            // 点击前再检查 failed
             if (await isTurnstileVerificationFailed(page)) {
                 lastState = 'turnstile_verification_failed';
                 console.log('[登录阶段] 点击前变成 Verification failed，停止点击，转刷新。');
@@ -627,11 +730,11 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
 
             const waitUntil = Math.min(Date.now() + 12000, startedAt + totalTimeoutMs);
             while (Date.now() < waitUntil) {
-                const info = await getTurnstileTokenInfo(page);
-                const state = classifyTurnstileState(info, { afterClick: true });
+                const after = await getTurnstileTokenInfo(page);
+                const state = classifyTurnstileState(after, { afterClick: true });
                 lastState = state;
                 if (state === 'turnstile_token_ready') {
-                    console.log(`[登录阶段] state=turnstile_token_ready，字段=${info.selector}，长度=${info.length}`);
+                    console.log(`[登录阶段] state=turnstile_token_ready，字段=${after.selector}，长度=${after.length}`);
                     gotToken = true;
                     break;
                 }
@@ -653,7 +756,7 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
             return { ok: true, state: 'turnstile_token_ready', message: 'Turnstile token ready after click' };
         }
 
-        // 5) 本轮无 token：按状态决定是否刷新；超过 maxReloads 直接结束
+        // 6) 本轮无 token：刷新，超过 maxReloads 结束
         reloads++;
         if (reloads > maxReloads) {
             const finalState = lastState === 'turnstile_verification_failed'
@@ -674,7 +777,6 @@ async function solveLoginTurnstile(page, totalTimeoutMs = 90000) {
         try {
             await reloadLoginChallenge(page, reason);
         } catch (e) { }
-        // continue → 重新完整等待，不立即点击
     }
 
     const finalInfo = await getTurnstileTokenInfo(page);
