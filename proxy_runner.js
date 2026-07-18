@@ -8,9 +8,11 @@ const EXIT_CODE = {
     SUCCESS: 0,
     FATAL: 1,
     PROXY_RETRY: 42,       // 只有这个码才触发代理轮换
+    RENEW_CAPTCHA_FAILED: 43, // Renew ALTCHA 失败，不换代理
     NOT_READY: 3,
     ALREADY_RENEWED: 4,
-    LOGIN_FAILED: 5
+    LOGIN_FAILED: 5,
+    NO_PROXY_AVAILABLE: 6 // 全部代理冷却，暂无可用代理
 };
 
 // --- 只有明确成功/不可重试状态才停止轮换 ---
@@ -18,7 +20,8 @@ const NON_RETRYABLE = new Set([
     EXIT_CODE.SUCCESS,
     EXIT_CODE.NOT_READY,
     EXIT_CODE.ALREADY_RENEWED,
-    EXIT_CODE.LOGIN_FAILED
+    EXIT_CODE.LOGIN_FAILED,
+    EXIT_CODE.RENEW_CAPTCHA_FAILED
 ]);
 
 const CHROME_PORT = 9222;
@@ -273,8 +276,8 @@ function runActionRenew(proxyLine) {
             if (selection) {
                 proxyLine = selection.line;
             } else {
-                console.log('[proxy-runner] 无可选代理（全部冷却中），停止本轮');
-                process.exit(EXIT_CODE.FATAL);
+                console.log('[proxy-runner] 无可选代理（全部冷却中），等待冷却过期');
+                process.exit(EXIT_CODE.NO_PROXY_AVAILABLE);
             }
         } else {
             console.log('[proxy-runner] 无代理列表，直接运行');

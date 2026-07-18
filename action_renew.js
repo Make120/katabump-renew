@@ -1258,10 +1258,15 @@ async function ensureScreenshotsDir() {
         let blockMessage = '';
 
         try {
-            if (page.isClosed()) {
-                page = await context.newPage();
-                await page.addInitScript(INJECTED_SCRIPT);
-            }
+            // 每个账号独立会话，清除上一账号的 Cookie 和存储
+            try { await context.clearCookies(); } catch(e) {}
+            try { await page.evaluate(() => { try { localStorage.clear(); } catch(e){} try { sessionStorage.clear(); } catch(e){} }).catch(() => {}); } catch(e) {}
+
+            const oldPage = page;
+            page = await context.newPage();
+            await page.addInitScript(INJECTED_SCRIPT);
+            if (oldPage !== page) try { await oldPage.close(); } catch(e) {}
+
 
             // 1. 访问登录页
             console.log('访问登录页面...');
@@ -1921,8 +1926,10 @@ async function ensureScreenshotsDir() {
             if (blockMessage && blockMessage.startsWith('Login')) {
                 loginCaptchaFailed = true;
             } else {
-                // Renew ALTCHA 失败 → 不换代理，但也不能返回 SUCCESS
-                if (overallExitCode === EXIT_CODE.SUCCESS) {
+                // Renew ALTCHA 失败 → 覆盖 NOT_READY / ALREADY_RENEWED
+                if (overallExitCode === EXIT_CODE.SUCCESS ||
+                    overallExitCode === EXIT_CODE.NOT_READY ||
+                    overallExitCode === EXIT_CODE.ALREADY_RENEWED) {
                     overallExitCode = EXIT_CODE.RENEW_CAPTCHA_FAILED;
                 }
             }
