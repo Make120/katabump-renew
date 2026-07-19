@@ -84,73 +84,59 @@ function parseProxyLine(line, lineNumber) {
     const trimmed = (line || '').trim();
     if (!trimmed || trimmed.startsWith('#')) return { valid: false, reason: 'empty_or_comment', lineNumber };
 
+    // Helper: strict decimal port 1-65535
+    const isValidPort = (s) => /^[0-9]+$/.test(s) && s.length > 0 && s.length <= 5 && Number(s) >= 1 && Number(s) <= 65535;
+
+    // Prefer USER:PASS@HOST:PORT when the suffix after the LAST @ looks like HOST:PORT
     const atIdx = trimmed.lastIndexOf('@');
+    if (atIdx > 0) {
+        const after = trimmed.substring(atIdx + 1);
+        const afterParts = after.split(':');
+        if (afterParts.length > 2) {
+            return { valid: false, reason: `invalid_host_field_count:${afterParts.length}`, lineNumber };
+        }
+        if (afterParts.length === 2 && afterParts[0] && isValidPort(afterParts[1])) {
+            const before = trimmed.substring(0, atIdx);
+            const firstColon = before.indexOf(':');
+            if (firstColon > 0) {
+                const username = before.substring(0, firstColon);
+                const password = before.substring(firstColon + 1);
+                const hasUser = username.length > 0;
+                const hasPass = password.length > 0;
+                if (hasUser && hasPass) {
+                    return { valid: true, ip: afterParts[0], port: afterParts[1], username, password, lineNumber };
+                }
+                return { valid: false, reason: 'invalid_credentials', lineNumber };
+            }
+        }
+        // @ present but not matching USER:PASS@HOST:PORT → fall through to colon-count
+    }
 
-    // Prefer colon-count format only when the second field is a valid port number.
-    // This avoids mistaking USER:PASS@HOST:PORT (with @ in password) for HOST:PORT:USER:PASS.
     const colonParts = trimmed.split(':');
-    const secondIsInteger = Number.isInteger(Number(colonParts[1]));
 
-    if (colonParts.length === 2 && secondIsInteger) {
+    if (colonParts.length === 2) {
         const ip = colonParts[0];
         const port = colonParts[1];
         if (!ip) return { valid: false, reason: 'empty_ip', lineNumber };
         if (!port) return { valid: false, reason: 'empty_port', lineNumber };
-        const portNum = Number(port);
-        if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
-            return { valid: false, reason: `invalid_port:${port}`, lineNumber };
-        }
+        if (!isValidPort(port)) return { valid: false, reason: `invalid_port:${port}`, lineNumber };
         return { valid: true, ip, port, username: '', password: '', lineNumber };
     }
 
-    if (colonParts.length >= 4 && secondIsInteger) {
+    if (colonParts.length >= 4) {
         const ip = colonParts[0];
         const port = colonParts[1];
         if (!ip) return { valid: false, reason: 'empty_ip', lineNumber };
         if (!port) return { valid: false, reason: 'empty_port', lineNumber };
-        const portNum = Number(port);
-        if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
-            return { valid: false, reason: `invalid_port:${port}`, lineNumber };
-        }
+        if (!isValidPort(port)) return { valid: false, reason: `invalid_port:${port}`, lineNumber };
         const username = colonParts[2] || '';
         const password = colonParts.slice(3).join(':') || '';
         const hasUser = username.length > 0;
         const hasPass = password.length > 0;
-        if (hasUser !== hasPass) {
+        if (!(hasUser && hasPass)) {
             return { valid: false, reason: 'invalid_credentials', lineNumber };
         }
         return { valid: true, ip, port, username, password, lineNumber };
-    }
-
-    // Fallback: USER:PASS@HOST:PORT
-    if (atIdx > 0) {
-        const before = trimmed.substring(0, atIdx);
-        const after = trimmed.substring(atIdx + 1);
-        const firstColon = before.indexOf(':');
-        if (firstColon > 0) {
-            const username = before.substring(0, firstColon);
-            const password = before.substring(firstColon + 1);
-            const afterColons = after.split(':');
-            if (afterColons.length === 2) {
-                const host = afterColons[0];
-                const port = afterColons[1];
-                if (host && port) {
-                    const portNum = Number(port);
-                    if (Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535) {
-                        const hasUser = username.length > 0;
-                        const hasPass = password.length > 0;
-                        if (hasUser !== hasPass) {
-                            return { valid: false, reason: 'invalid_credentials', lineNumber };
-                        }
-                        return { valid: true, ip: host, port, username, password, lineNumber };
-                    }
-                    return { valid: false, reason: `invalid_port:${port}`, lineNumber };
-                }
-                if (!host) return { valid: false, reason: 'empty_host', lineNumber };
-                return { valid: false, reason: 'empty_port', lineNumber };
-            }
-            return { valid: false, reason: `invalid_host_field_count:${afterColons.length}`, lineNumber };
-        }
     }
 
     return { valid: false, reason: `invalid_field_count:${colonParts.length}`, lineNumber };
@@ -185,6 +171,8 @@ function buildChildEnv(parsed, baseEnv) {
     }
     env.HTTP_PROXY = proxyUrl;
     env.HTTPS_PROXY = proxyUrl;
+    env.http_proxy = proxyUrl;
+    env.https_proxy = proxyUrl;
     return env;
 }
 

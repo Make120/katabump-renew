@@ -46,8 +46,20 @@ function tests() {
             expect: { valid: false, reason: 'invalid_port:65536' }
         },
         {
+            line: '1.2.3.4:1e3',
+            expect: { valid: false, reason: 'invalid_port:1e3' }
+        },
+        {
+            line: '1.2.3.4:0x50',
+            expect: { valid: false, reason: 'invalid_port:0x50' }
+        },
+        {
+            line: '1.2.3.4:+8080',
+            expect: { valid: false, reason: 'invalid_port:+8080' }
+        },
+        {
             line: 'abc:def',
-            expect: { valid: false, reason: 'invalid_field_count:2' }
+            expect: { valid: false, reason: 'invalid_port:def' }
         },
         {
             line: '1.2.3.4:8080:user',
@@ -72,6 +84,14 @@ function tests() {
         {
             line: '1.2.3.4:8080:username:',
             expect: { valid: false, reason: 'invalid_credentials' }
+        },
+        {
+            line: '1.2.3.4:8080::',
+            expect: { valid: false, reason: 'invalid_credentials' }
+        },
+        {
+            line: 'user:123:secret@1.2.3.4:8080',
+            expect: { ip: '1.2.3.4', port: '8080', username: 'user', password: '123:secret', valid: true }
         },
         {
             line: 'user:pa:ss@1.2.3.4:8080',
@@ -188,12 +208,16 @@ function tests() {
         assert.strictEqual(cleaned.https_proxy, undefined);
     }
 
-    // buildChildEnv: valid parsed sets proxy env vars
+    // buildChildEnv: valid parsed sets all four proxy env vars and clears old lowercase
     {
         const base = { ...process.env };
+        base.http_proxy = 'http://old:lower';
+        base.https_proxy = 'http://old:lower';
         const cleaned = mod.buildChildEnv(mod.parseProxyLine('1.2.3.4:8080:user:pass'), base);
         assert.ok(cleaned.HTTP_PROXY.includes('1.2.3.4:8080'));
         assert.ok(cleaned.HTTPS_PROXY.includes('1.2.3.4:8080'));
+        assert.ok(cleaned.http_proxy.includes('1.2.3.4:8080'));
+        assert.ok(cleaned.https_proxy.includes('1.2.3.4:8080'));
     }
 
     console.log('[proxy-runner tests] all tests passed');
