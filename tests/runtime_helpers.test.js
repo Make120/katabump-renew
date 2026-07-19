@@ -1,11 +1,15 @@
 const assert = require('assert');
+const { EventEmitter } = require('events');
 const {
     buildBrowserLaunchOptions,
     classifyProxyResponse,
     classifyProxyError,
     validateUsersConfig,
     safeAccountLabel,
-    finalizeAccountResources
+    finalizeAccountResources,
+    normalizeTimeoutMinutes,
+    terminateProcessTree,
+    runChildWithTimeout
 } = require('../lib/runtime_helpers');
 const { sendTelegramNotification } = require('../lib/telegram');
 
@@ -34,19 +38,70 @@ async function tests() {
     }
     assert.strictEqual(classifyProxyResponse(407).ok, false);
     assert.strictEqual(classifyProxyResponse(407).category, 'proxy_auth_failed');
-    for (const status of [500, 502, 503, 504]) {
+    for (const status of [500, 501, 505, 599]) {
+        const result = classifyProxyResponse(status);
+        assert.strictEqual(result.ok, true);
+        assert.strictEqual(result.reachable, true);
+        assert.strictEqual(result.category, 'target_server_error');
+    }
+    for (const status of [502, 503, 504]) {
         const result = classifyProxyResponse(status);
         assert.strictEqual(result.ok, false);
         assert.strictEqual(result.category, 'upstream_gateway_error');
     }
     assert.strictEqual(classifyProxyResponse(0).reachable, false);
-    assert.strictEqual(classifyProxyError({ message: 'timeout of 10000ms exceeded' }).category, 'transport_error');
+    for (const error of [
+        { code: 'ETIMEDOUT', message: 'timeout' },
+        { code: 'ENOTFOUND', message: 'dns failure' },
+        { code: 'ECONNRESET', message: 'connection reset' },
+        { code: 'ECONNREFUSED', message: 'connection refused' }
+    ]) {
+        assert.strictEqual(classifyProxyError(error).category, 'transport_error');
+    }
 
-    assert.strictEqual(validateUsersConfig('not-json').valid, false);
+    assert.strictEqual(validateUsersConfig(undefined).fatal, true);
+    assert.strictEqual(validateUsersConfig('not-json').fatal, true);
     assert.strictEqual(validateUsersConfig('{}').reason, 'invalid_root');
     assert.strictEqual(validateUsersConfig('[]').reason, 'empty_users');
-    assert.strictEqual(validateUsersConfig('[{"username":"" ,"password":"p"}]').reason, 'invalid_user_1:invalid_username');
-    assert.strictEqual(validateUsersConfig('[{"username":"u"}]').reason, 'invalid_user_1:invalid_password');
+    const mixedUsers = validateUsersConfig(JSON.stringify([
+        { username: 'good@example.com', password: 'secret' },
+        { username: '', password: 'p' },
+        { username: 'second@example.com', password: 'secret2' }
+    ]));
+    assert.strictEqual(mixedUsers.valid, true);
+    assert.strictEqual(mixedUsers.fatal, false);
+    assert.strictEqual(mixedUsers.users.length, 3);
+    assert.strictEqual(mixedUsers.users[0].__invalidConfig, false);
+    assert.deepStrictEqual(
+        { username: mixedUsers.users[1].username, password: mixedUsers.users[1].password, reason: mixedUsers.users[1].__invalidReason },
+        { username: '', password: '', reason: 'invalid_username' }
+    );
+    assert.strictEqual(mixedUsers.users[2].username, 'second@example.com');
+    const badFirst = validateUsersConfig(JSON.stringify([
+        { username: '', password: 'p' },
+        { username: 'later@example.com', password: 'p2' }
+    ]));
+    assert.strictEqual(badFirst.users[0].__invalidConfig, true);
+    assert.strictEqual(badFirst.users[1].__invalidConfig, false);
+    const badLast = validateUsersConfig(JSON.stringify([
+        { username: 'first@example.com', password: 'p1' },
+        { username: 'later@example.com', password: '' }
+    ]));
+    assert.strictEqual(badLast.users[0].__invalidConfig, false);
+    assert.strictEqual(badLast.users[1].__invalidConfig, true);
+    for (const invalidUser of [
+        null,
+        {},
+        { username: 123, password: 'p' },
+        { username: 'u' },
+        { username: 'u', password: 123 }
+    ]) {
+        const result = validateUsersConfig(JSON.stringify([{ username: 'good', password: 'p' }, invalidUser, { username: 'later', password: 'p2' }]));
+        assert.strictEqual(result.valid, true);
+        assert.strictEqual(result.users.length, 3);
+        assert.strictEqual(result.users[1].__invalidConfig, true);
+        assert.strictEqual(result.users[2].username, 'later');
+    }
     const validUsers = validateUsersConfig('{"users":[{"username":" u@example.com ","password":"p"}]}');
     assert.strictEqual(validUsers.valid, true);
     assert.strictEqual(validUsers.users[0].username, 'u@example.com');
@@ -68,7 +123,22 @@ async function tests() {
     assert.strictEqual(pageClosed, 1);
     assert.strictEqual(contextClosed, 1);
     assert.ok(cleanupResult.screenshotError);
+    assert.strictEqual(cleanupResult.screenshotPath, null);
     assert.strictEqual(cleanupResult.pageCloseError, null);
+
+    let screenshotPath = null;
+    const successfulCleanup = await finalizeAccountResources({
+        page: {
+            screenshot: async options => { screenshotPath = options.path; },
+            close: async () => {}
+        },
+        context: { close: async () => {} },
+        ensureDir: async () => '/tmp/screenshots',
+        screenshotName: 'account.png',
+        logger: () => {}
+    });
+    assert.strictEqual(successfulCleanup.screenshotPath, '/tmp/screenshots/account.png');
+    assert.strictEqual(screenshotPath, '/tmp/screenshots/account.png');
 
     let closeAfterScreenshot = 0;
     let contextCloseAfterPageError = 0;
@@ -86,6 +156,60 @@ async function tests() {
     assert.strictEqual(contextCloseAfterPageError, 1);
     assert.ok(secondCleanup.pageCloseError);
     assert.ok(secondCleanup.contextCloseError);
+
+    assert.strictEqual(normalizeTimeoutMinutes('25'), 25);
+    assert.strictEqual(normalizeTimeoutMinutes('0'), 25);
+    assert.strictEqual(normalizeTimeoutMinutes('-1'), 25);
+    assert.strictEqual(normalizeTimeoutMinutes('30'), 25);
+    assert.strictEqual(normalizeTimeoutMinutes('not-a-number'), 25);
+
+    class FakeProcess extends EventEmitter {
+        constructor(onKill) {
+            super();
+            this.pid = 9876;
+            this.exitCode = null;
+            this.signals = [];
+            this.onKill = onKill;
+        }
+        kill(signal) {
+            this.signals.push(signal);
+            if (this.onKill) this.onKill(signal, this);
+            return true;
+        }
+    }
+
+    const normalProcess = new FakeProcess((signal, proc) => {
+        if (signal === 'SIGTERM') setTimeout(() => proc.emit('exit', 0), 1);
+    });
+    const normalResultPromise = runChildWithTimeout(normalProcess, { timeoutMs: 30, gracefulMs: 10, logger: () => {} });
+    setTimeout(() => normalProcess.emit('exit', 0), 1);
+    const normalResult = await normalResultPromise;
+    assert.deepStrictEqual(normalResult, { code: 0, timedOut: false });
+    assert.deepStrictEqual(normalProcess.signals, []);
+
+    const gracefulProcess = new FakeProcess((signal, proc) => {
+        if (signal === 'SIGTERM') setTimeout(() => proc.emit('exit', 0), 1);
+    });
+    const gracefulResult = await runChildWithTimeout(gracefulProcess, { timeoutMs: 5, gracefulMs: 20, logger: () => {} });
+    assert.strictEqual(gracefulResult.code, 1);
+    assert.strictEqual(gracefulResult.timedOut, true);
+    assert.deepStrictEqual(gracefulProcess.signals, ['SIGTERM']);
+
+    const forcedProcess = new FakeProcess((signal, proc) => {
+        if (signal === 'SIGKILL') setTimeout(() => proc.emit('exit', null), 1);
+    });
+    const forcedResult = await runChildWithTimeout(forcedProcess, { timeoutMs: 5, gracefulMs: 5, logger: () => {} });
+    assert.strictEqual(forcedResult.code, 1);
+    assert.strictEqual(forcedResult.timedOut, true);
+    assert.deepStrictEqual(forcedProcess.signals, ['SIGTERM', 'SIGKILL']);
+
+    const raceProcess = new FakeProcess();
+    const raceResultPromise = runChildWithTimeout(raceProcess, { timeoutMs: 30, logger: () => {} });
+    raceProcess.emit('exit', 0);
+    raceProcess.emit('error', new Error('late error'));
+    const raceResult = await raceResultPromise;
+    assert.deepStrictEqual(raceResult, { code: 0, timedOut: false });
+    assert.strictEqual(terminateProcessTree({ exitCode: 0 }, 'SIGTERM'), false);
 
     const axiosCalls = [];
     const axios = {
@@ -118,6 +242,15 @@ async function tests() {
     assert.strictEqual(telegramResult.imageSent, true);
     assert.strictEqual(axiosCalls.length, 2);
     assert.strictEqual(errors.length, 1);
+    assert.strictEqual((await sendTelegramNotification({
+        axios: { post: async () => {} },
+        FormData: FakeFormData,
+        fs: { existsSync: () => false },
+        token: 'token-for-test',
+        chatId: 'chat-for-test',
+        message: 'text-only',
+        imagePath: '/tmp/missing.png'
+    })).imageSent, false);
     assert.strictEqual((await sendTelegramNotification({ axios, FormData: FakeFormData, fs, token: '', chatId: 'chat', message: 'x' })).skipped, true);
 
     console.log('[runtime helper tests] all tests passed');

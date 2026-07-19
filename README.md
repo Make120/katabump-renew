@@ -170,34 +170,31 @@ Run workflow
 
 ```text
 Downloading Webshare proxy list...
-Proxy list downloaded. Total lines: 10
-Selected Webshare proxy: 191.96.254.138:6185
+Proxy list downloaded. Lines: 10
+[proxy-runner] 选择代理: HOST:PORT
 ```
 
 ### 2. 代理检测
 
-正常日志类似：
+当前流程会使用目标登录地址做预检，再由 Playwright 以原生代理配置启动浏览器：
 
 ```text
-Direct IP:
-20.xx.xx.xx
-Proxy IP:
-191.96.xxx.xxx
-```
-
-如果 `Proxy IP` 检测失败，但后续 `action_renew.js` 显示代理连接成功，也可以继续观察后续结果。
-
-### 3. 脚本检测到代理
-
-正常日志类似：
-
-```text
-[代理] 检测到配置: 服务器=http://IP:PORT, 认证=是
+[代理] 检测到配置: 服务器=http://HOST:PORT, 认证=是
 [代理] 正在验证代理连接...
-[代理] 连接成功！
+[代理] 目标页面响应：HTTP 200，分类=target_reachable
 ```
 
-这说明代理已经成功传入 `action_renew.js`。
+预检分类包括 `target_reachable`、`target_server_error`、`proxy_auth_failed`、`upstream_gateway_error` 和 `transport_error`。只有后三者中的代理认证、网关或传输错误会触发代理轮换；普通目标服务器 5xx 不会被错误归因于代理。
+
+### 3. 多账号、超时和 Telegram
+
+单个无效账号会记为登录失败并发送账号级通知，但不会阻断后续正常账号。根 JSON 错误、根结构错误或空账号数组才会使整轮 FATAL。
+
+```text
+[proxy-runner] 启动 action_renew.js，超时=25 分钟，SIGTERM 宽限=12 秒...
+```
+
+子进程默认超时为 25 分钟，也可以通过 `ACTION_TIMEOUT_MINUTES` 调整（必须小于 30 分钟）。超时先向整个子进程组发送 SIGTERM，等待 12 秒让业务执行清理逻辑，仍未退出时才发送 SIGKILL；Windows 使用安全的子进程 fallback。配置 Telegram 后，每个账号的最终状态通知都会附带账号最终截图；图片上传失败只记录日志，不影响续期结果。
 
 ---
 
@@ -271,13 +268,7 @@ npm ci
 
 ### 3. 配置账号
 
-复制模板：
-
-```text
-login.json.template → login.json
-```
-
-填写：
+设置 `USERS_JSON` 环境变量，内容示例：
 
 ```json
 [
@@ -288,7 +279,7 @@ login.json.template → login.json
 ]
 ```
 
-`login.json` 已加入 `.gitignore`，不会被提交到 GitHub。
+不要打印或提交该环境变量。
 
 ### 4. 本地代理（可选）
 
@@ -298,20 +289,22 @@ PowerShell：
 
 ```powershell
 $env:HTTP_PROXY="http://user:pass@127.0.0.1:7890"
-node renew.js
+$env:USERS_JSON='[{"username":"your_email@example.com","password":"your_password"}]'
+node proxy_runner.js
 ```
 
 CMD：
 
 ```cmd
 set HTTP_PROXY=http://user:pass@127.0.0.1:7890
-node renew.js
+set USERS_JSON=[{"username":"your_email@example.com","password":"your_password"}]
+node proxy_runner.js
 ```
 
 无代理直接运行：
 
 ```bash
-node renew.js
+node proxy_runner.js
 ```
 
 ---
@@ -321,8 +314,7 @@ node renew.js
 ```text
 .
 ├── action_renew.js                  # GitHub Actions 环境使用的续期脚本
-├── renew.js                         # 本地运行脚本
-├── login.json.template              # 本地账号模板
+├── proxy_runner.js                   # 代理选择、超时和退出码控制器
 ├── package.json
 ├── README.md                        # 中文说明
 ├── README_EN.md                     # 英文说明
@@ -343,7 +335,6 @@ HTTP_PROXY 完整链接
 代理用户名和密码
 TG_BOT_TOKEN
 TG_CHAT_ID
-login.json
 ```
 
 推荐全部放在 GitHub Secrets 中。
@@ -383,7 +374,11 @@ USERS_JSON 是否是合法 JSON
 账号是否需要人工登录确认
 ```
 
-### 5. Actions 有 Node 20 弃用提示
+### 5. `target_server_error`
+
+HTTP 500、501、505 等普通目标服务器错误说明请求已经到达目标服务，不会因此冷却代理。HTTP 407 表示代理认证失败；502、503、504 表示上游网关错误；网络超时、DNS 失败和连接重置会归类为 `transport_error`。
+
+### 6. Actions 有 Node 20 弃用提示
 
 当前 workflow 已使用：
 

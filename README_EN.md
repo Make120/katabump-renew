@@ -2,16 +2,16 @@
 
 [English Version](README_EN.md) | [中文说明](README.md)
 
-This project is an automation script for renewing Katabump servers. It utilizes Playwright and CDP (Chrome DevTools Protocol) to simulate user interactions, effectively specifically targeting the Cloudflare Turnstile CAPTCHA to ensure continuous server service.
+This project is an automation script for renewing Katabump servers with Playwright. It launches a browser with native proxy settings, processes each configured account in an isolated BrowserContext, and records explicit business outcomes.
 
 It supports both **Windows Local Execution** and **GitHub Actions Cloud Execution**.
 
 ## ✨ Features
 
-- **Smart Bypass**: Uses CDP to simulate realistic mouse trajectories and clicks, combined with screen coordinate spoofing, to achieve a high success rate in bypassing Cloudflare Turnstile.
-- **Auto-Retry**: Built-in strict verification retry mechanism. It automatically restarts the verification flow if the CAPTCHA check fails.
+- **Explicit outcomes**: Separates target responses, proxy authentication failures, gateway failures, transport failures, and account failures.
+- **Account isolation**: One invalid account is recorded as a login failure while later valid accounts continue.
 - **Multi-User**: Supports batch renewal for multiple accounts.
-- **Cloud/Local**: Can run on your local machine or automatically on part of a daily schedule using GitHub Actions.
+- **Cloud/Local**: Can run on your local machine or automatically on a daily schedule using GitHub Actions.
 
 ---
 
@@ -41,11 +41,18 @@ This is the easiest way to set it up once and have it run automatically every da
     > If not configured, notifications will be skipped.
 ### 4. Results & Screenshots
 - **Logs**: Check real-time logs in the `Run Renew Script` step.
-- **Screenshots**: Screenshots are automatically captured for each user (success or failure) and uploaded as artifacts.
+- **Screenshots**: Screenshots are automatically captured for each user (success or failure), sent with configured Telegram notifications, and uploaded as artifacts.
   - Download the `screenshots` zip file from the **Artifacts** section of the workflow run summary.
   - Files are named `username.png`.
 5.  Save it. Then, go to the **Actions** tab and enable the workflow. It is scheduled to run automatically at **08:00 Beijing Time (00:00 UTC)**.
 6.  You can also manually click "Run workflow" to test it immediately.
+
+### Runtime behavior
+
+- The proxy list is downloaded, parsed and filtered, then an uncooldown proxy is selected and preflighted against the target login URL before Playwright starts.
+- Preflight categories are `target_reachable`, `target_server_error`, `proxy_auth_failed`, `upstream_gateway_error`, and `transport_error`.
+- The default child-process timeout is 25 minutes. `ACTION_TIMEOUT_MINUTES` may adjust it, but it must remain below the 30-minute workflow timeout.
+- A timeout first sends SIGTERM to the process group, waits 12 seconds for cleanup, and then sends SIGKILL if needed. Image-upload failures are logged without changing the renewal result.
 
 ---
 
@@ -63,9 +70,7 @@ npm ci
 ```
 
 ### 3. Configure Credentials
-The project contains a `login.json.template` file.
-1. **Rename** it to `login.json`.
-2. Open it with a text editor and fill in your account credentials:
+Set `USERS_JSON` in the environment and fill in your account credentials:
    ```json
    [
        {
@@ -74,25 +79,10 @@ The project contains a `login.json.template` file.
        }
    ]
    ```
-   > **Note**: `login.json` is included in `.gitignore` and will NOT be uploaded to GitHub.
+   Do not print this value or commit it to the repository.
 
 ### 4. Configure Chrome Path
-Open the `renew.js` file and look for lines 11-12:
-
-```javascript
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
-const HEADLESS = true;
-```
-
-*   **CHROME_PATH**: This is the installation path of your local Chrome browser. Modify this if your installation path is different!
-*   **USER_DATA_DIR**:
-    *   This folder stores browser data generated during script execution (cache, cookies, sessions, etc.).
-    *   **Purpose**: It helps maintain your login session so you don't need to re-enter credentials every time.
-    *   **Can it be deleted?**: **Yes**. If you want to reset all states (clear cache completely), simply delete this folder. The script will recreate it the next time it runs.
-*   **HEADLESS**:
-    *   `false`: The script launches a visible Chrome window so you can see what it's doing.
-    *   `true`: (Default) Runs silently in the background (headless mode), useful if you want it to run without disturbing you.
+Set `CHROME_PATH` if Chrome is not installed at `/usr/bin/google-chrome`. Each account is opened in an independent Playwright BrowserContext; the runner does not reuse a remote-debugging Chrome process.
 
 ### 5. Run Script
 
@@ -101,26 +91,27 @@ If you need to use a proxy, set the `HTTP_PROXY` environment variable:
 **Powershell:**
 ```powershell
 $env:HTTP_PROXY="http://user:pass@127.0.0.1:7890"
-node renew.js
+$env:USERS_JSON='[{"username":"myemail@gmail.com","password":"mypassword123"}]'
+node proxy_runner.js
 ```
 
 **CMD:**
 ```cmd
 set HTTP_PROXY=http://user:pass@127.0.0.1:7890
-node renew.js
+set USERS_JSON=[{"username":"myemail@gmail.com","password":"mypassword123"}]
+node proxy_runner.js
 ```
 
 Or just run without proxy:
 ```bash
-node renew.js
+node proxy_runner.js
 ```
-The script will auto-launch Chrome (if needed), process each account, and save a screenshot (`username.png`) in the `photo/` directory upon completion.
+The runner launches Chrome, processes each account, and saves a final screenshot in the `screenshots/` directory upon completion.
 
 ---
 
 ## 🛠️ Project Structure
 
-*   `renew.js`: Main script for Windows local execution.
 *   `action_renew.js`: Dedicated script for GitHub Actions environment (Linux/Headless adapted).
+*   `proxy_runner.js`: Proxy selection, cooldown, child-process timeout, and exit-code controller.
 *   `.github/workflows/renew.yml`: Configuration file for GitHub Actions scheduled tasks.
-*   `login.json`: (Manually created) Stores account info for local runs.

@@ -1194,9 +1194,20 @@ async function runMain() {
 
     if (PROXY_CONFIG) {
         const checkResult = await checkProxy();
-        if (checkResult.ok === false) {
+        const retryableProxyCategories = new Set([
+            'proxy_auth_failed',
+            'upstream_gateway_error',
+            'transport_error'
+        ]);
+        if (retryableProxyCategories.has(checkResult.category)) {
             console.error(`[代理] 连接失败，分类=${checkResult.category}，标记 PROXY_RETRY`);
             return EXIT_CODE.PROXY_RETRY;
+        }
+        if (checkResult.category === 'target_server_error') {
+            console.warn(`[代理] 目标服务器返回 HTTP ${checkResult.status}，分类=target_server_error，继续业务流程`);
+        } else if (!checkResult.ok) {
+            console.error(`[代理] 预检结果不可判定，分类=${checkResult.category}，停止本轮`);
+            return EXIT_CODE.FATAL;
         }
     }
 
@@ -1225,10 +1236,12 @@ async function runMain() {
         stopCurrentUser = false;
         let blockMessage = '';
 
+        let finalScreenshotPath = null;
+
         try {
             if (user.__invalidConfig) {
                 runStatus = 'login_failed';
-                blockMessage = 'Invalid account configuration';
+                blockMessage = `Invalid account configuration: ${user.__invalidReason}`;
             } else {
             // 每个账号使用独立的 BrowserContext，隔离 Cookie、Storage、IndexedDB、
             // Service Worker、Cache Storage 以及其他 Context 级状态。
@@ -1863,13 +1876,14 @@ async function runMain() {
             runStatus = 'error';
             blockMessage = err.message;
         } finally {
-            await finalizeAccountResources({
+            const cleanupResult = await finalizeAccountResources({
                 page,
                 context,
                 ensureDir: ensureScreenshotsDir,
                 screenshotName: `${accountLabel}.png`,
                 logger: console.error
             });
+            finalScreenshotPath = cleanupResult.screenshotPath;
             page = null;
             context = null;
         }
@@ -1886,20 +1900,24 @@ async function runMain() {
             if (!blockMessage) blockMessage = 'Renew loop exhausted without clear result';
         }
 
+        let notificationMessage = null;
         if (runStatus === 'success') {
-            await sendTelegramMessage(`✅ KataBump 续期完成\n用户: ${user.username}\n状态: 续期成功`);
+            notificationMessage = `✅ KataBump 续期完成\n用户: ${user.username}\n状态: 续期成功`;
         } else if (runStatus === 'not_ready') {
-            await sendTelegramMessage(`⏳ KataBump 本轮未续期\n用户: ${user.username}\n原因: ${blockMessage}\nCron 将在下次继续检查。`);
+            notificationMessage = `⏳ KataBump 本轮未续期\n用户: ${user.username}\n原因: ${blockMessage}\nCron 将在下次继续检查。`;
         } else if (runStatus === 'captcha_required') {
-            await sendTelegramMessage(`⚠️ KataBump 验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请检查验证码状态。`);
+            notificationMessage = `⚠️ KataBump 验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请检查验证码状态。`;
         } else if (runStatus === 'login_captcha_required') {
-            await sendTelegramMessage(`⚠️ KataBump 登录验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请解决验证码后重试。`);
+            notificationMessage = `⚠️ KataBump 登录验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请解决验证码后重试。`;
         } else if (runStatus === 'login_failed') {
-            await sendTelegramMessage(`❌ KataBump 登录失败\n用户: ${user.username}\n原因: ${blockMessage}`);
+            notificationMessage = `❌ KataBump 登录失败\n用户: ${user.username}\n原因: ${blockMessage}`;
         } else if (runStatus === 'already_renewed') {
-            await sendTelegramMessage(`ℹ️ KataBump 可能已续期\n用户: ${user.username}\nExpiry 未变化，可能本轮已是最新。`);
+            notificationMessage = `ℹ️ KataBump 可能已续期\n用户: ${user.username}\nExpiry 未变化，可能本轮已是最新。`;
         } else if (runStatus === 'error') {
-            await sendTelegramMessage(`❌ KataBump 错误\n用户: ${user.username}\n原因: ${blockMessage}`);
+            notificationMessage = `❌ KataBump 错误\n用户: ${user.username}\n原因: ${blockMessage}`;
+        }
+        if (notificationMessage) {
+            await sendTelegramMessage(notificationMessage, finalScreenshotPath);
         }
 
         // 账号级退出码归并

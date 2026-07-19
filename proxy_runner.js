@@ -2,6 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
+const {
+    normalizeTimeoutMinutes,
+    runChildWithTimeout,
+    DEFAULT_GRACEFUL_TERMINATION_MS
+} = require('./lib/runtime_helpers');
+
+const ACTION_TIMEOUT_MINUTES = normalizeTimeoutMinutes(process.env.ACTION_TIMEOUT_MINUTES);
+const ACTION_TIMEOUT_MS = ACTION_TIMEOUT_MINUTES * 60 * 1000;
 
 // --- 退出码（与 action_renew.js 完全一致） ---
 const EXIT_CODE = {
@@ -311,51 +319,39 @@ function selectRandomProxy(proxies, cooldowns) {
 //  运行子进程
 // ============================================================
 function runActionRenew(parsed) {
-    return new Promise((resolve) => {
-        const env = buildChildEnv(parsed, process.env);
-        if (!env) {
-            console.error('[proxy-runner] 当前代理格式无效，不静默直连');
-            resolve({ code: EXIT_CODE.FATAL });
-            return;
-        }
+    const env = buildChildEnv(parsed, process.env);
+    if (!env) {
+        console.error('[proxy-runner] 当前代理格式无效，不静默直连');
+        return Promise.resolve({ code: EXIT_CODE.FATAL });
+    }
 
-        if (parsed === null) {
-            console.log('[proxy-runner] 无代理模式，已清除 HTTP_PROXY / HTTPS_PROXY');
-        } else {
-            console.log(`[proxy-runner] 设置 HTTP_PROXY=${safeProxyId(parsed)}`);
-            const proxyUrl = buildHttpProxy(parsed);
-            console.log(`[proxy-runner] 代理地址: ${maskProxyUrl(proxyUrl)}`);
-            emitGithubMask(proxyUrl);
-        }
+    if (parsed === null) {
+        console.log('[proxy-runner] 无代理模式，已清除 HTTP_PROXY / HTTPS_PROXY');
+    } else {
+        console.log(`[proxy-runner] 设置 HTTP_PROXY=${safeProxyId(parsed)}`);
+        const proxyUrl = buildHttpProxy(parsed);
+        console.log(`[proxy-runner] 代理地址: ${maskProxyUrl(proxyUrl)}`);
+        emitGithubMask(proxyUrl);
+    }
 
-        const scriptPath = path.join(process.cwd(), 'action_renew.js');
-        console.log(`[proxy-runner] 启动 action_renew.js...`);
+    const scriptPath = path.join(process.cwd(), 'action_renew.js');
+    console.log(`[proxy-runner] 启动 action_renew.js，超时=${ACTION_TIMEOUT_MINUTES} 分钟，SIGTERM 宽限=${Math.round(DEFAULT_GRACEFUL_TERMINATION_MS / 1000)} 秒...`);
 
-        const proc = spawn('node', [scriptPath], { env, stdio: 'inherit', shell: false });
+    const proc = spawn('node', [scriptPath], {
+        env,
+        stdio: 'inherit',
+        shell: false,
+        detached: process.platform !== 'win32'
+    });
 
-        let timedOut = false;
-        const timeout = setTimeout(() => {
-            timedOut = true;
-            console.error('[proxy-runner] action_renew.js 运行超时 (10min)，强制终止');
-            proc.kill('SIGKILL');
-        }, 10 * 60 * 1000);
-
-        proc.on('exit', (code) => {
-            clearTimeout(timeout);
-            if (timedOut) {
-                resolve({ code: EXIT_CODE.FATAL, timedOut: true });
-                return;
-            }
-            const safeCode = (code !== null && code !== undefined) ? code : EXIT_CODE.FATAL;
-            console.log(`[proxy-runner] action_renew.js 退出码: ${safeCode}`);
-            resolve({ code: safeCode });
-        });
-
-        proc.on('error', (err) => {
-            clearTimeout(timeout);
-            console.error('[proxy-runner] 启动子进程失败:', err.message);
-            resolve({ code: EXIT_CODE.FATAL });
-        });
+    return runChildWithTimeout(proc, {
+        timeoutMs: ACTION_TIMEOUT_MS,
+        gracefulMs: DEFAULT_GRACEFUL_TERMINATION_MS,
+        logger: console.error
+    }).then((result) => {
+        if (result.error) console.error('[proxy-runner] 启动或运行子进程失败:', result.error.message);
+        console.log(`[proxy-runner] action_renew.js 退出码: ${result.code}`);
+        return { code: result.code, timedOut: result.timedOut };
     });
 }
 
@@ -449,5 +445,11 @@ module.exports = {
     loadProxies,
     selectRandomProxy,
     proxyKey,
-    safeProxyId
+    safeProxyId,
+    runActionRenew,
+    normalizeTimeoutMinutes,
+    runChildWithTimeout,
+    ACTION_TIMEOUT_MINUTES,
+    ACTION_TIMEOUT_MS,
+    DEFAULT_GRACEFUL_TERMINATION_MS
 };
