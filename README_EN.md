@@ -4,7 +4,7 @@
 
 This project is an automation script for renewing Katabump servers with Playwright. It launches a browser with native proxy settings, processes each configured account in an isolated BrowserContext, and records explicit business outcomes.
 
-It supports both **Windows Local Execution** and **GitHub Actions Cloud Execution**.
+It is designed for **GitHub Actions on Ubuntu/Linux**.
 
 ## ✨ Features
 
@@ -56,57 +56,9 @@ This is the easiest way to set it up once and have it run automatically every da
 
 ---
 
-## 💻 Windows Local Execution Guide
+## 🐧 Linux GitHub Actions Runtime
 
-Follow these steps if you want to run the script locally on your computer for debugging or monitoring.
-
-### 1. Prerequisites
-Ensure you have [Node.js](https://nodejs.org/) installed (version v18+ recommended).
-
-### 2. Install Dependencies
-Open a terminal (PowerShell or CMD) in the project root directory and run:
-```bash
-npm ci
-```
-
-### 3. Configure Credentials
-Set `USERS_JSON` in the environment and fill in your account credentials:
-   ```json
-   [
-       {
-           "username": "myemail@gmail.com",
-           "password": "mypassword123"
-       }
-   ]
-   ```
-   Do not print this value or commit it to the repository.
-
-### 4. Configure Chrome Path
-Set `CHROME_PATH` if Chrome is not installed at `/usr/bin/google-chrome`. Each account is opened in an independent Playwright BrowserContext; the runner does not reuse a remote-debugging Chrome process.
-
-### 5. Run Script
-
-If you need to use a proxy, set the `HTTP_PROXY` environment variable:
-
-**Powershell:**
-```powershell
-$env:HTTP_PROXY="http://user:pass@127.0.0.1:7890"
-$env:USERS_JSON='[{"username":"myemail@gmail.com","password":"mypassword123"}]'
-node proxy_runner.js
-```
-
-**CMD:**
-```cmd
-set HTTP_PROXY=http://user:pass@127.0.0.1:7890
-set USERS_JSON=[{"username":"myemail@gmail.com","password":"mypassword123"}]
-node proxy_runner.js
-```
-
-Or just run without proxy:
-```bash
-node proxy_runner.js
-```
-The runner launches Chrome, processes each account, and saves a final screenshot in the `screenshots/` directory upon completion.
+The workflow is the only supported runtime: Ubuntu, Node.js 24, Xvfb, and the Chrome installation prepared by the Playwright dependency step. It runs `npm ci`, preflights the target login URL through the selected proxy, starts Playwright with native proxy settings, processes accounts in order, and uploads screenshots as artifacts.
 
 ---
 

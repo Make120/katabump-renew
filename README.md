@@ -194,7 +194,7 @@ Proxy list downloaded. Lines: 10
 [proxy-runner] 启动 action_renew.js，超时=25 分钟，SIGTERM 宽限=12 秒...
 ```
 
-子进程默认超时为 25 分钟，也可以通过 `ACTION_TIMEOUT_MINUTES` 调整（必须小于 30 分钟）。超时先向整个子进程组发送 SIGTERM，等待 12 秒让业务执行清理逻辑，仍未退出时才发送 SIGKILL；Windows 使用安全的子进程 fallback。配置 Telegram 后，每个账号的最终状态通知都会附带账号最终截图；图片上传失败只记录日志，不影响续期结果。
+子进程默认超时为 25 分钟，也可以通过 `ACTION_TIMEOUT_MINUTES` 调整（必须小于 30 分钟）。超时先向整个 Linux 子进程组发送 SIGTERM，等待 12 秒让业务执行清理逻辑，仍未退出时才发送 SIGKILL。配置 Telegram 后，每个账号的最终状态通知都会附带账号最终截图；图片上传失败只记录日志，不影响续期结果。
 
 ---
 
@@ -245,67 +245,9 @@ error_x.png
 
 ---
 
-## 💻 本地运行（Windows / Mac / Linux）
+## 🐧 GitHub Actions Linux 运行环境
 
-本地运行适合调试和观察页面行为。
-
-### 1. 安装 Node.js
-
-建议 Node.js 版本：
-
-```text
-Node.js 20+
-推荐 Node.js 24
-```
-
-### 2. 安装依赖
-
-在项目根目录运行：
-
-```bash
-npm ci
-```
-
-### 3. 配置账号
-
-设置 `USERS_JSON` 环境变量，内容示例：
-
-```json
-[
-  {
-    "username": "your_email@example.com",
-    "password": "your_password"
-  }
-]
-```
-
-不要打印或提交该环境变量。
-
-### 4. 本地代理（可选）
-
-如果本地需要代理，可以设置 `HTTP_PROXY` 环境变量。
-
-PowerShell：
-
-```powershell
-$env:HTTP_PROXY="http://user:pass@127.0.0.1:7890"
-$env:USERS_JSON='[{"username":"your_email@example.com","password":"your_password"}]'
-node proxy_runner.js
-```
-
-CMD：
-
-```cmd
-set HTTP_PROXY=http://user:pass@127.0.0.1:7890
-set USERS_JSON=[{"username":"your_email@example.com","password":"your_password"}]
-node proxy_runner.js
-```
-
-无代理直接运行：
-
-```bash
-node proxy_runner.js
-```
+Workflow 是本项目唯一支持的运行方式：Ubuntu、Node.js 24、Xvfb，以及由 Playwright 依赖步骤准备的 Chrome。Workflow 会执行 `npm ci`，通过选定代理预检目标登录地址，使用 Playwright 原生代理配置启动浏览器，按顺序处理账号并上传截图 Artifact。
 
 ---
 

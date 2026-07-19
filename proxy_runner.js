@@ -341,7 +341,7 @@ function runActionRenew(parsed) {
         env,
         stdio: 'inherit',
         shell: false,
-        detached: process.platform !== 'win32'
+        detached: true
     });
 
     return runChildWithTimeout(proc, {

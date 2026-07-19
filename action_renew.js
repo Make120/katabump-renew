@@ -8,6 +8,7 @@ const {
     buildBrowserLaunchOptions,
     classifyProxyResponse,
     classifyProxyError,
+    mergeExitCode,
     validateUsersConfig,
     safeAccountLabel,
     finalizeAccountResources
@@ -52,6 +53,8 @@ const TARGET_LOGIN_URL = 'https://dashboard.katabump.com/auth/login';
 let PROXY_CONFIG = null;
 let PROXY_CONFIG_ERROR = null;
 let activeBrowser = null;
+let shutdownRequested = false;
+let shutdownPromise = null;
 
 if (HTTP_PROXY) {
     try {
@@ -1162,21 +1165,18 @@ function getUserExitCode(runStatus) {
     }
 }
 
-const EXIT_CODE_PRIORITY = [
-    EXIT_CODE.FATAL,
-    EXIT_CODE.PROXY_RETRY,
-    EXIT_CODE.LOGIN_FAILED,
-    EXIT_CODE.RENEW_CAPTCHA_FAILED,
-    EXIT_CODE.NOT_READY,
-    EXIT_CODE.ALREADY_RENEWED,
-    EXIT_CODE.SUCCESS
-];
-
-function mergeExitCode(current, newCode) {
-    const curIdx = EXIT_CODE_PRIORITY.indexOf(current);
-    const newIdx = EXIT_CODE_PRIORITY.indexOf(newCode);
-    if (curIdx < 0 || newIdx < 0) return current;
-    return newIdx < curIdx ? newCode : current;
+async function handleAllInvalidUsers(users) {
+    let overallExitCode = EXIT_CODE.SUCCESS;
+    for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        const accountLabel = safeAccountLabel(user, i);
+        const displayAccount = user.username || accountLabel;
+        const blockMessage = `Invalid account configuration: ${user.__invalidReason}`;
+        console.error(`[配置] ${accountLabel} 标记为 login_failed：${user.__invalidReason}`);
+        await sendTelegramMessage(`❌ KataBump 登录失败\n用户: ${displayAccount}\n原因: ${blockMessage}`);
+        overallExitCode = mergeExitCode(overallExitCode, EXIT_CODE.LOGIN_FAILED);
+    }
+    return overallExitCode;
 }
 
 // ============================================================
@@ -1189,6 +1189,10 @@ async function runMain() {
         return EXIT_CODE.FATAL;
     }
     const users = usersConfig.users;
+
+    if (users.every(user => user.__invalidConfig)) {
+        return handleAllInvalidUsers(users);
+    }
 
     if (PROXY_CONFIG_ERROR) return EXIT_CODE.FATAL;
 
@@ -1222,13 +1226,13 @@ async function runMain() {
     let page = null;
 
     let overallExitCode = EXIT_CODE.SUCCESS;
-    let loginCaptchaFailed = false;
     let shouldStopAllUsers = false;
     let stopCurrentUser = false;
 
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
         const accountLabel = safeAccountLabel(user, i);
+        const displayAccount = user.username || accountLabel;
         console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`);
 
         let renewSuccess = false;
@@ -1284,7 +1288,6 @@ async function runMain() {
                             ? `login_turnstile_click_target_missing_${accountLabel}`
                             : `login_turnstile_token_missing_${accountLabel}`;
                 await dumpDebugSnapshot(page, snapName);
-                loginCaptchaFailed = true;
                 shouldStopAllUsers = true;
                 // break removed - let unified finalize handle
             }
@@ -1902,19 +1905,19 @@ async function runMain() {
 
         let notificationMessage = null;
         if (runStatus === 'success') {
-            notificationMessage = `✅ KataBump 续期完成\n用户: ${user.username}\n状态: 续期成功`;
+            notificationMessage = `✅ KataBump 续期完成\n用户: ${displayAccount}\n状态: 续期成功`;
         } else if (runStatus === 'not_ready') {
-            notificationMessage = `⏳ KataBump 本轮未续期\n用户: ${user.username}\n原因: ${blockMessage}\nCron 将在下次继续检查。`;
+            notificationMessage = `⏳ KataBump 本轮未续期\n用户: ${displayAccount}\n原因: ${blockMessage}\nCron 将在下次继续检查。`;
         } else if (runStatus === 'captcha_required') {
-            notificationMessage = `⚠️ KataBump 验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请检查验证码状态。`;
+            notificationMessage = `⚠️ KataBump 验证码阻断\n用户: ${displayAccount}\n原因: ${blockMessage}\n请检查验证码状态。`;
         } else if (runStatus === 'login_captcha_required') {
-            notificationMessage = `⚠️ KataBump 登录验证码阻断\n用户: ${user.username}\n原因: ${blockMessage}\n请解决验证码后重试。`;
+            notificationMessage = `⚠️ KataBump 登录验证码阻断\n用户: ${displayAccount}\n原因: ${blockMessage}\n请解决验证码后重试。`;
         } else if (runStatus === 'login_failed') {
-            notificationMessage = `❌ KataBump 登录失败\n用户: ${user.username}\n原因: ${blockMessage}`;
+            notificationMessage = `❌ KataBump 登录失败\n用户: ${displayAccount}\n原因: ${blockMessage}`;
         } else if (runStatus === 'already_renewed') {
-            notificationMessage = `ℹ️ KataBump 可能已续期\n用户: ${user.username}\nExpiry 未变化，可能本轮已是最新。`;
+            notificationMessage = `ℹ️ KataBump 可能已续期\n用户: ${displayAccount}\nExpiry 未变化，可能本轮已是最新。`;
         } else if (runStatus === 'error') {
-            notificationMessage = `❌ KataBump 错误\n用户: ${user.username}\n原因: ${blockMessage}`;
+            notificationMessage = `❌ KataBump 错误\n用户: ${displayAccount}\n原因: ${blockMessage}`;
         }
         if (notificationMessage) {
             await sendTelegramMessage(notificationMessage, finalScreenshotPath);
@@ -1924,11 +1927,6 @@ async function runMain() {
         const userExitCode = getUserExitCode(runStatus);
         overallExitCode = mergeExitCode(overallExitCode, userExitCode);
 
-        // 仅登录阶段 captcha_required 才触发代理轮换
-        // 不再根据字符串判断阶段，而是根据触发来源直接区分
-        if (runStatus === 'login_captcha_required') {
-            loginCaptchaFailed = true;
-        }
         if (runStatus === 'error') {
             shouldStopAllUsers = true;
         }
@@ -1943,12 +1941,6 @@ async function runMain() {
 
     console.log('\n全部账号处理完成。');
 
-    if (overallExitCode === EXIT_CODE.FATAL) return EXIT_CODE.FATAL;
-    if (overallExitCode === EXIT_CODE.LOGIN_FAILED) return EXIT_CODE.LOGIN_FAILED;
-    // Login-stage proxy failure is a retryable business result and exits 42.
-    if (loginCaptchaFailed) return EXIT_CODE.PROXY_RETRY;
-    // Renew CAPTCHA failure is a business failure and exits 43.
-    if (overallExitCode === EXIT_CODE.RENEW_CAPTCHA_FAILED) return EXIT_CODE.RENEW_CAPTCHA_FAILED;
     return overallExitCode;
 }
 
@@ -1990,7 +1982,33 @@ async function closeActiveBrowser() {
     }
 }
 
+function installSignalHandlers() {
+    const handleShutdownSignal = (signal) => {
+        if (shutdownRequested) return;
+        shutdownRequested = true;
+        console.error(`[主流程] 收到 ${signal}，开始清理 BrowserContext、page 和 browser`);
+
+        const fallbackTimeout = setTimeout(() => {
+            console.error('[主流程] 信号清理超过 8 秒，返回 FATAL');
+            process.exit(EXIT_CODE.FATAL);
+        }, 8000);
+
+        shutdownPromise = closeActiveBrowser()
+            .catch((error) => {
+                console.error('[主流程] 信号清理失败:', error.message);
+            })
+            .finally(() => {
+                clearTimeout(fallbackTimeout);
+                process.exit(EXIT_CODE.FATAL);
+            });
+    };
+
+    process.once('SIGTERM', () => handleShutdownSignal('SIGTERM'));
+    process.once('SIGINT', () => handleShutdownSignal('SIGINT'));
+}
+
 (async () => {
+    installSignalHandlers();
     let finalExitCode = EXIT_CODE.FATAL;
     try {
         finalExitCode = await runMain();

@@ -4,6 +4,7 @@ const {
     buildBrowserLaunchOptions,
     classifyProxyResponse,
     classifyProxyError,
+    mergeExitCode,
     validateUsersConfig,
     safeAccountLabel,
     finalizeAccountResources,
@@ -50,6 +51,10 @@ async function tests() {
         assert.strictEqual(result.category, 'upstream_gateway_error');
     }
     assert.strictEqual(classifyProxyResponse(0).reachable, false);
+    assert.strictEqual(mergeExitCode(5, 42), 42);
+    assert.strictEqual(mergeExitCode(42, 5), 42);
+    assert.strictEqual(mergeExitCode(43, 3), 43);
+    assert.strictEqual(mergeExitCode(3, 4), 3);
     for (const error of [
         { code: 'ETIMEDOUT', message: 'timeout' },
         { code: 'ENOTFOUND', message: 'dns failure' },
@@ -195,12 +200,16 @@ async function tests() {
     assert.strictEqual(gracefulResult.timedOut, true);
     assert.deepStrictEqual(gracefulProcess.signals, ['SIGTERM']);
 
-    const forcedProcess = new FakeProcess((signal, proc) => {
-        if (signal === 'SIGKILL') setTimeout(() => proc.emit('exit', null), 1);
+    const forcedProcess = new FakeProcess();
+    const forcedResult = await runChildWithTimeout(forcedProcess, {
+        timeoutMs: 5,
+        gracefulMs: 5,
+        finalSettlementMs: 5,
+        logger: () => {}
     });
-    const forcedResult = await runChildWithTimeout(forcedProcess, { timeoutMs: 5, gracefulMs: 5, logger: () => {} });
     assert.strictEqual(forcedResult.code, 1);
     assert.strictEqual(forcedResult.timedOut, true);
+    assert.strictEqual(forcedResult.forced, true);
     assert.deepStrictEqual(forcedProcess.signals, ['SIGTERM', 'SIGKILL']);
 
     const raceProcess = new FakeProcess();
